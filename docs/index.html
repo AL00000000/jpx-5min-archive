@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>5分足アーカイブ | 非TOPIX・時価総額350億超</title>
+<style>
+:root{--bg:#0a0f1c;--panel:#101830;--panel2:#0d1426;--border:#1e2a48;--text:#dbe4f5;
+      --muted:#7787a5;--accent:#39c5cf;--up:#ff5b6a;--down:#4da3ff;--grid:#1a2540}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);min-height:100vh;
+     font-family:"Segoe UI","Hiragino Sans","Yu Gothic UI",Meiryo,sans-serif}
+.wrap{max-width:1180px;margin:0 auto;padding:24px 16px 64px}
+header.site{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px 18px;padding:8px 4px 18px}
+header.site h1{font-size:1.4rem;font-weight:700;letter-spacing:.02em}
+header.site h1 .dot{color:var(--accent)}
+header.site .sub{color:var(--muted);font-size:.84rem}
+.toolbar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;background:var(--panel);
+         border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin-bottom:10px}
+label{color:var(--muted);font-size:.82rem;margin-right:6px}
+select,input{background:var(--panel2);color:var(--text);border:1px solid var(--border);
+             border-radius:8px;padding:8px 12px;font-size:.9rem;outline:none}
+select:focus,input:focus{border-color:var(--accent)}
+input#q{width:210px}
+select#sym{min-width:270px}
+.spacer{flex:1}
+.stat{color:var(--muted);font-size:.82rem}
+.stat b{color:var(--text);font-weight:600}
+.banner{border:1px solid var(--border);border-radius:10px;background:var(--panel2);
+        padding:9px 14px;margin-bottom:12px;font-size:.84rem;color:var(--muted)}
+.banner b{color:var(--text)}
+.banner .err{color:var(--up)}
+.day{background:var(--panel);border:1px solid var(--border);border-radius:12px;
+     padding:12px 14px 6px;margin-bottom:12px}
+.day h2{font-size:.92rem;font-weight:700;margin-bottom:2px}
+.day .meta{color:var(--muted);font-size:.78rem;margin-bottom:8px;
+           display:flex;flex-wrap:wrap;gap:4px 16px}
+.day .meta .up{color:var(--up)}.day .meta .down{color:var(--down)}
+.day .meta b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+svg{display:block;width:100%}
+svg text{fill:var(--muted);font-size:9px;font-family:inherit}
+svg .axis{stroke:var(--grid);stroke-width:1}
+svg .sep{stroke:#2c3c63;stroke-width:1;stroke-dasharray:3 3}
+.loading{padding:40px;text-align:center;color:var(--muted)}
+footer{margin-top:16px;color:var(--muted);font-size:.75rem;line-height:1.7;padding:0 4px}
+@media(max-width:720px){input#q,select#sym{width:100%}select#sym{min-width:0}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="site">
+    <h1>5分足アーカイブ<span class="dot">.</span></h1>
+    <span class="sub">非TOPIX・時価総額350億円超 / 毎営業日 大引け後に自動記録(ローカル保存)</span>
+  </header>
+
+  <div class="toolbar">
+    <input id="q" type="search" placeholder="銘柄名・コードで絞り込み">
+    <span><label>銘柄</label><select id="sym"></select></span>
+    <span><label>表示</label><select id="days">
+      <option value="1">最新1日</option>
+      <option value="3">最新3日</option>
+      <option value="5" selected>最新5日</option>
+      <option value="10">最新10日</option>
+      <option value="0">全期間</option>
+    </select></span>
+    <span class="spacer"></span>
+    <span class="stat" id="stat"></span>
+  </div>
+
+  <div class="banner" id="banner">読み込み中…</div>
+  <div id="charts"><div class="loading">読み込み中…</div></div>
+
+  <footer>
+    データ取得元: 株探(kabutan.jp)の5分足 / 各日 9:00〜15:30 の67本(15:30は引け) /
+    このアーカイブはローカル保存のみで外部公開していません。<br>
+    データの正確性は保証されません。投資判断はご自身の責任で行ってください。
+  </footer>
+</div>
+
+<script>
+"use strict";
+// bar = [t, o, h, l, c, v]
+const T = 0, O = 1, H = 2, L = 3, C = 4, V = 5;
+
+const state = { manifest: null, symbols: [], code: null, dayCache: new Map() };
+
+const $ = id => document.getElementById(id);
+
+async function loadDay(date) {
+  if (state.dayCache.has(date)) return state.dayCache.get(date);
+  const res = await fetch("data/" + date + ".json.gz", { cache: "no-store" });
+  if (!res.ok) throw new Error(date + " の読み込みに失敗 (HTTP " + res.status + ")");
+  if (typeof DecompressionStream !== "function") {
+    throw new Error("このブラウザはgzip展開(DecompressionStream)に未対応です");
+  }
+  const ds = new DecompressionStream("gzip");
+  const json = await new Response(res.body.pipeThrough(ds)).json();
+  state.dayCache.set(date, json);
+  return json;
+}
+
+const fmtP = n => n.toLocaleString("ja-JP", { maximumFractionDigits: 1 });
+const fmtV = n => n.toLocaleString("ja-JP");
+const pct = n => (n > 0 ? "+" : "") + n.toFixed(2) + "%";
+
+// 1日分の5分足をローソク足+出来高のSVGで描く
+function chartSVG(bars, w, h) {
+  const padL = 52, padR = 8, padT = 8, padB = 16;
+  const volH = Math.round(h * 0.22), gap = 6;
+  const priceH = h - padT - padB - volH - gap;
+  const n = bars.length, innerW = w - padL - padR;
+  const slot = innerW / n, cw = Math.max(1.5, Math.min(9, slot * 0.62));
+
+  let lo = Infinity, hi = -Infinity, vmax = 0;
+  for (const b of bars) {
+    if (b[L] < lo) lo = b[L];
+    if (b[H] > hi) hi = b[H];
+    if (b[V] > vmax) vmax = b[V];
+  }
+  const pad = (hi - lo) * 0.08 || hi * 0.005 || 1;
+  lo -= pad; hi += pad;
+  const y = p => padT + priceH * (1 - (p - lo) / (hi - lo));
+  const x = i => padL + i * slot + slot / 2;
+  const vy = v => padT + priceH + gap + volH - volH * (vmax ? v / vmax : 0);
+
+  let s = '<svg viewBox="0 0 ' + w + ' ' + h + '" height="' + h + '" xmlns="http://www.w3.org/2000/svg">';
+  for (let g = 0; g <= 4; g++) {
+    const p = lo + (hi - lo) * g / 4, yy = y(p);
+    s += '<line class="axis" x1="' + padL + '" y1="' + yy.toFixed(1) + '" x2="' + (w - padR) + '" y2="' + yy.toFixed(1) + '"/>'
+       + '<text x="' + (padL - 4) + '" y="' + (yy + 3).toFixed(1) + '" text-anchor="end">' + fmtP(p) + '</text>';
+  }
+  // 昼休み(12:30の寄り)に区切り線
+  const li = bars.findIndex(b => b[T] === "12:30");
+  if (li > 0) {
+    const lx = (padL + li * slot).toFixed(1);
+    s += '<line class="sep" x1="' + lx + '" y1="' + padT + '" x2="' + lx + '" y2="' + (padT + priceH + gap + volH) + '"/>';
+  }
+  for (let i = 0; i < n; i++) {
+    const b = bars[i], cx = x(i), up = b[C] >= b[O];
+    const col = up ? "var(--up)" : "var(--down)";
+    const yo = y(b[O]), yc = y(b[C]);
+    const top = Math.min(yo, yc), bh = Math.max(1, Math.abs(yc - yo));
+    const vtop = vy(b[V]);
+    s += '<line x1="' + cx.toFixed(1) + '" y1="' + y(b[H]).toFixed(1) + '" x2="' + cx.toFixed(1) + '" y2="' + y(b[L]).toFixed(1) + '" stroke="' + col + '" stroke-width="1"/>'
+       + '<rect x="' + (cx - cw / 2).toFixed(1) + '" y="' + top.toFixed(1) + '" width="' + cw.toFixed(1) + '" height="' + bh.toFixed(1) + '" fill="' + col + '"/>'
+       + '<rect x="' + (cx - cw / 2).toFixed(1) + '" y="' + vtop.toFixed(1) + '" width="' + cw.toFixed(1) + '" height="' + (padT + priceH + gap + volH - vtop).toFixed(1) + '" fill="' + col + '" opacity="0.45"/>';
+  }
+  for (const tm of ["09:00", "10:00", "11:00", "12:30", "13:30", "14:30", "15:30"]) {
+    const i = bars.findIndex(b => b[T] === tm);
+    if (i >= 0) s += '<text x="' + x(i).toFixed(1) + '" y="' + (h - 4) + '" text-anchor="middle">' + tm + '</text>';
+  }
+  return s + "</svg>";
+}
+
+function dayBlock(date, bars, prevClose) {
+  const o = bars[0][O], c = bars[bars.length - 1][C];
+  const hi = Math.max.apply(null, bars.map(b => b[H]));
+  const lo = Math.min.apply(null, bars.map(b => b[L]));
+  const vol = bars.reduce((a, b) => a + b[V], 0);
+  let ch = "";
+  if (prevClose != null && prevClose > 0) {
+    const d = (c - prevClose) / prevClose * 100;
+    ch = '<span class="' + (d >= 0 ? "up" : "down") + '">前日比 <b>' + pct(d) + '</b></span>';
+  }
+  const el = document.createElement("div");
+  el.className = "day";
+  el.innerHTML = '<h2>' + date + '</h2>'
+    + '<div class="meta">'
+    + '<span>始 <b>' + fmtP(o) + '</b></span><span>高 <b>' + fmtP(hi) + '</b></span>'
+    + '<span>安 <b>' + fmtP(lo) + '</b></span><span>終 <b>' + fmtP(c) + '</b></span>'
+    + '<span>出来高 <b>' + fmtV(vol) + '</b></span>' + ch
+    + '<span>' + bars.length + '本</span>'
+    + '</div>' + chartSVG(bars, 1120, 240);
+  return el;
+}
+
+function fillSymbolSelect() {
+  const q = $("q").value.trim().toLowerCase();
+  const list = state.symbols.filter(s =>
+    !q || s.name.toLowerCase().includes(q) || s.code.toLowerCase().includes(q));
+  const sel = $("sym"), keep = state.code;
+  sel.innerHTML = list.map(s =>
+    '<option value="' + s.code + '">' + s.code + " " + s.name + "（" + s.market + "）</option>").join("");
+  if (list.some(s => s.code === keep)) sel.value = keep;
+  else if (list.length) { state.code = list[0].code; sel.value = list[0].code; }
+  else { state.code = null; }
+  $("stat").innerHTML = "該当 <b>" + list.length + "</b> / " + state.symbols.length + " 銘柄";
+  return list.length > 0;
+}
+
+async function render() {
+  const box = $("charts");
+  if (!state.code) { box.innerHTML = '<div class="loading">該当する銘柄がありません</div>'; return; }
+  box.innerHTML = '<div class="loading">読み込み中…</div>';
+
+  const nsel = +$("days").value;
+  const all = state.manifest.dates;
+  const dates = nsel === 0 ? all : all.slice(0, nsel);
+  const need = dates.slice();
+  // 前日比の基準として1日多く読む
+  const base = all[all.indexOf(dates[dates.length - 1]) + 1];
+  if (base) need.push(base);
+
+  try {
+    const days = await Promise.all(need.map(d => loadDay(d).then(j => [d, j])));
+    const map = new Map(days);
+    const frag = document.createDocumentFragment();
+    let shown = 0;
+    for (const d of dates) {
+      const day = map.get(d);
+      const bars = day && day.bars ? day.bars[state.code] : null;
+      if (!bars || !bars.length) continue;
+      const prevDate = all[all.indexOf(d) + 1];
+      const pd = prevDate ? map.get(prevDate) : null;
+      const pb = pd && pd.bars ? pd.bars[state.code] : null;
+      frag.appendChild(dayBlock(d, bars, pb && pb.length ? pb[pb.length - 1][C] : null));
+      shown++;
+    }
+    box.innerHTML = "";
+    if (!shown) box.innerHTML = '<div class="loading">この銘柄のデータがありません</div>';
+    else box.appendChild(frag);
+  } catch (e) {
+    box.innerHTML = '<div class="loading">読み込みエラー: ' + e.message + '</div>';
+  }
+}
+
+async function init() {
+  try {
+    const res = await fetch("data/manifest.json", { cache: "no-store" });
+    if (!res.ok) throw new Error("manifest.json が読めません (HTTP " + res.status + ")");
+    state.manifest = await res.json();
+  } catch (e) {
+    $("banner").innerHTML = '<span class="err">' + e.message + '</span>';
+    $("charts").innerHTML = '<div class="loading">データがありません</div>';
+    return;
+  }
+  state.symbols = state.manifest.symbols || [];
+  state.code = state.symbols.length ? state.symbols[0].code : null;
+
+  const d = state.manifest.dates;
+  $("banner").innerHTML = "保存済み: <b>" + d.length + "</b> 営業日分"
+    + (d.length ? " (<b>" + d[d.length - 1] + "</b> 〜 <b>" + d[0] + "</b>)" : "")
+    + " / 銘柄数 <b>" + state.symbols.length + "</b>"
+    + " / 最終更新 <b>" + (state.manifest.updated || "-") + "</b>";
+
+  fillSymbolSelect();
+  $("q").oninput = () => { fillSymbolSelect(); render(); };
+  $("sym").onchange = e => { state.code = e.target.value; render(); };
+  $("days").onchange = render;
+  render();
+}
+init();
+</script>
+</body>
+</html>
