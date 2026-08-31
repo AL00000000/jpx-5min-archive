@@ -148,14 +148,52 @@ def main() -> None:
         c["add"] = bool(ok_t and ok_c)
         c["fail"] = ([] if ok_t else ["回転率"]) + ([] if ok_c else ["浮動株時価総額"])
 
+    # ------------------------------------------- 判定の確からしさを数値化する
+    # 採用側は浮動株比率が推計値なので、その実測誤差分布(推計値÷正解)をそのまま当てて
+    # 「浮動株時価総額が足切りを超えている確率」を出す。
+    # 除外側はJPXのウエイトから逆算した値なので銘柄ごとの誤差は小さく、効いてくるのは
+    # 足切り値そのもののズレ。したがって足切りからの距離だけで危うさを測る。
+    facs = sorted(min(1.0, m["holder_ratio"] * float_calib) / m["implied_ratio"]
+                  for m in members if m.get("holder_ratio") and m.get("implied_ratio"))
+
+    def p_above(fm, th):
+        if not facs or not th:
+            return None
+        return sum(1 for f in facs if fm / f >= th) / len(facs)
+
+    for c in candidates:
+        if c["code"] in NG:
+            c["p_add"], c["conf"], c["risk"] = None, None, "none"
+            continue
+        p = p_above(c["float_mktcap"], t96)
+        c["p_add"] = None if p is None else round(p, 3)
+        conf = p if c["add"] else (1 - p)
+        c["conf"] = round(conf, 3)
+        c["risk"] = "low" if conf >= 0.9 else "mid" if conf >= 0.7 else "high"
+
+    for m in members:
+        if m["code"] in NG:
+            m["margin"], m["risk"] = None, "none"
+            continue
+        mg = m["float_mktcap"] / t97 if t97 else None
+        m["margin"] = None if mg is None else round(mg, 3)
+        if mg is None:
+            m["risk"] = "low"
+        elif 0.90 <= mg <= 1.11:
+            m["risk"] = "high"
+        elif 0.80 <= mg <= 1.25:
+            m["risk"] = "mid"
+        else:
+            m["risk"] = "low"
+
     def slim(x, keys):
         return {k: (round(v, 4) if isinstance(v, float) else v)
                 for k, v in x.items() if k in keys}
 
     mk = ("code name sector size weight float_mktcap turnover months keep fail "
-          "implied_ratio holder_ratio kanri").split()
+          "implied_ratio holder_ratio kanri margin risk").split()
     ck = ("code name market mktcap float_ratio float_mktcap turnover months add fail "
-          "nonfloat_pct nonfloat kanri float_ratio_raw").split()
+          "nonfloat_pct nonfloat kanri float_ratio_raw p_add conf risk").split()
 
     excluded = sorted([m for m in members if not m["keep"]],
                       key=lambda x: -x["float_mktcap"])          # 大きい順
@@ -202,6 +240,9 @@ def main() -> None:
     print(f"母集団から除外(整理・特別注意銘柄) {len(NG)}銘柄: {sorted(NG)}")
     print(f"浮動株比率のキャリブレーション x{float_calib:.3f} (実測{len(ratios)}銘柄)")
     print(f"候補 {len(candidates)} → 採用 {len(added)}")
+    hi = sum(1 for x in added if x["risk"] == "high")
+    hm = sum(1 for x in excluded if x["risk"] == "high")
+    print(f"確度: 採用のうち微妙 {hi}銘柄 / 除外のうち当落線上 {hm}銘柄")
     print(f"次期TOPIX 想定 {len(kept)+len(added)} 銘柄   -> {OUT}")
 
 
