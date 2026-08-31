@@ -179,6 +179,8 @@ def main() -> None:
             "market_days": market_days,
             "n_members": len(members), "n_candidates": len(candidates),
             "n_keep": len(kept), "n_excluded": len(excluded), "n_added": len(added),
+            "n_band_keep": sum(1 for x in kept if t97 <= x["float_mktcap"] < t96),
+            "n_band_miss": sum(1 for x in missed if t97 <= x["float_mktcap"] < t96),
             "float_calib": round(float_calib, 4), "n_calib_sample": len(ratios),
             "ineligible": NG, "n_kanri": len(KANRI),
             "skipped": skipped,
