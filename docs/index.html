@@ -44,6 +44,48 @@ svg .sep{stroke:#2c3c63;stroke-width:1;stroke-dasharray:3 3}
 .loading{padding:40px;text-align:center;color:var(--muted)}
 footer{margin-top:16px;color:var(--muted);font-size:.75rem;line-height:1.7;padding:0 4px}
 @media(max-width:720px){input#q,select#sym{width:100%}select#sym{min-width:0}}
+
+/* --- 入替推計ビュー --- */
+nav.subtabs{display:flex;gap:8px;margin:0 4px 14px;flex-wrap:wrap}
+nav.subtabs .stab{background:var(--panel2);color:var(--muted);border:1px solid var(--border);
+  border-radius:999px;padding:8px 18px;font-size:.88rem;cursor:pointer;font-family:inherit}
+nav.subtabs .stab:hover{color:var(--text)}
+nav.subtabs .stab.active{background:var(--accent);color:#04202a;border-color:var(--accent);font-weight:700}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:10px;margin-bottom:14px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:12px 14px}
+.card .ttl{color:var(--muted);font-size:.74rem;margin-bottom:5px}
+.card .val{font-size:1.22rem;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:.01em}
+.card .sub2{color:var(--muted);font-size:.72rem;margin-top:3px}
+.card .val.warn{color:var(--up)}.card .val.ok{color:var(--accent)}
+.note{border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:10px;
+  background:var(--panel2);padding:11px 15px;margin-bottom:14px;font-size:.82rem;line-height:1.75;color:var(--muted)}
+.note b{color:var(--text)}
+.note .warn{color:var(--up)}
+details.method{border:1px solid var(--border);border-radius:10px;background:var(--panel2);
+  padding:0;margin-bottom:14px;font-size:.82rem;line-height:1.75;color:var(--muted)}
+details.method summary{cursor:pointer;padding:11px 15px;color:var(--text);font-size:.85rem;font-weight:600}
+details.method .body{padding:0 15px 13px}
+details.method b{color:var(--text)}
+.tablewrap{background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow-x:auto;margin-bottom:14px}
+table.grid{border-collapse:collapse;width:100%;font-size:.83rem;white-space:nowrap}
+table.grid th,table.grid td{padding:7px 11px;border-bottom:1px solid var(--border);text-align:right}
+table.grid th{position:sticky;top:0;background:var(--panel2);color:var(--muted);font-weight:600;
+  font-size:.76rem;cursor:pointer;user-select:none;z-index:1}
+table.grid th:hover{color:var(--text)}
+table.grid th.l,table.grid td.l{text-align:left}
+table.grid td{font-variant-numeric:tabular-nums}
+table.grid tbody tr:hover{background:#16203c}
+table.grid .nm{color:var(--text);font-weight:600}
+table.grid .cd{color:var(--muted);font-size:.78rem}
+.pill{display:inline-block;border-radius:999px;padding:1px 9px;font-size:.72rem;font-weight:700}
+.pill.out{background:#3a1520;color:#ff8a96}
+.pill.in{background:#0d3038;color:#5fe0e8}
+.pill.near{background:#33280d;color:#ffcb5c}
+.bar{position:relative;height:4px;border-radius:2px;background:var(--grid);margin-top:3px}
+.bar i{position:absolute;left:0;top:0;height:100%;border-radius:2px;background:var(--accent)}
+.bar i.ng{background:var(--up)}
+.filterrow{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px}
+.filterrow .cnt{color:var(--muted);font-size:.8rem;margin-left:auto}
 </style>
 </head>
 <body>
@@ -53,6 +95,14 @@ footer{margin-top:16px;color:var(--muted);font-size:.75rem;line-height:1.7;paddi
     <span class="sub">非TOPIX・時価総額350億円超の5分足 / 毎営業日 大引け後に自動記録</span>
   </header>
 
+  <nav class="subtabs">
+    <button class="stab active" data-view="est">入替推計</button>
+    <button class="stab" data-view="chart">5分足チャート</button>
+  </nav>
+
+  <div id="view-est"><div class="loading">読み込み中…</div></div>
+
+  <div id="view-chart" hidden>
   <div class="toolbar">
     <input id="q" type="search" placeholder="銘柄名・コードで絞り込み">
     <span><label>銘柄</label><select id="sym"></select></span>
@@ -69,6 +119,7 @@ footer{margin-top:16px;color:var(--muted);font-size:.75rem;line-height:1.7;paddi
 
   <div class="banner" id="banner">読み込み中…</div>
   <div id="charts"><div class="loading">読み込み中…</div></div>
+  </div>
 
   <footer>
     データ取得元: 株探(kabutan.jp)の5分足 / 各日 9:00〜15:30 の67本(15:30は引け) /
@@ -251,5 +302,6 @@ async function init() {
 }
 init();
 </script>
+<script src="rebalance.js"></script>
 </body>
 </html>
