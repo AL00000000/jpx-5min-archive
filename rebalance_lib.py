@@ -202,18 +202,58 @@ def fetch_profile(code: str, use_cache: bool = True) -> dict:
     return out
 
 
-# 非浮動株(政策保有・親会社・自己株式等)とみなす株主名のパターン。
-# JPXの浮動株比率は「政策保有株」を除外するため、信託口/カストディアン(=運用目的)は
-# 浮動株として残し、事業会社・創業家・自己株式・持株会を非浮動として扱う。
+# 大株主上位10名を「浮動株 / 非浮動株」に振り分けるためのパターン。
+# JPXの浮動株比率は「政策保有株」を除外する。したがって
+#   非浮動 … 自己株式・持株会・親会社や事業会社の政策保有・銀行/生保の政策保有・創業家
+#   浮動   … 信託口やカストディアン、証券会社、運用ファンド(アクティビストを含む)
+# 判定は下の3段階を上から順に当てる。どれにも当たらなければ非浮動(事業会社・創業家とみなす)。
+# 「日本マスタートラスト信託銀行」のように、銀行なのに浮動株であるものを先に拾う必要がある。
+
+# ① 確実に浮動株(信託口・カストディアン・証券会社・ファンド)
+_FLOAT_STRONG = re.compile(
+    r"信託口|マスタートラスト|カストデ|"
+    r"ステート[･・]?ストリート|ノーザン[･・]?トラスト|"
+    r"ＪＰモルガン|JPモルガン|JPMORGAN|ＪＰＭ|JPM|"
+    r"ＢＮＹ|BNY|ニユ?ーヨーク|メロン|ＨＳＢＣ|HSBC|"
+    r"バークレイズ|シティ|ゴールドマン|モルガン|メリルリンチ|ＵＢＳ|UBS|"
+    r"チェース|マンハッタン|ＢＢＨ|BBH|ブラウン[･・]?ブラザーズ|"
+    r"ＢＮＰ|BNP|パリバ|ソシエテ|ドイツ銀行|スタンダードチャータード|"
+    r"証券|證券|ブローカー|セキュリティーズ|ノミニー|オムニバス|"
+    r"クライアント|アカウント|"
+    r"ファンド|ＦＵＮＤ|FUND|ポートフォリオ|ＵＣＩＴＳ|UCITS|SICAV|"
+    r"ＤＦＡ|DFA|ヴァンガード|バンガード|ブラックロック|フィデリティ|"
+    r"ノルウェー政府|ＧＩＣ|アブダビ|クウェート")
+
+# ② 確実に非浮動(自己株・持株会・政策保有の金融機関・投資事業組合)
 _NONFLOAT = re.compile(
-    r"自己株|自社\(自己株口\)|自社持株会|自社グループ持株会|従業員持株会|"
-    r"取引先持株会|役員持株会|共栄会|協力会")
-# 明らかに運用目的(浮動株)とみなすパターン
+    r"自己株|自社|持株会|共栄会|協力会|"
+    r"投資事業有限責任組合|投資事業組合|財団|奨学会|"
+    r"生命保険|損害保険|海上火災|火災海上|"
+    r"銀行|信用金庫|信用組合|農林中央金庫|商工組合|信用農業")
+
+# ③ ①に漏れた運用主体(社名だけでは断定しづらいが運用目的とみられるもの)
 _FLOAT_HINT = re.compile(
-    r"信託口|信託銀行|カストデ|ステート[･・]?ストリート|ノーザン[･・]?トラスト|"
-    r"ＪＰモルガン|JPモルガン|ＢＮＹ|BNY|ＨＳＢＣ|HSBC|バークレイズ|"
-    r"シティバンク|ゴールドマン|モルガン[･・]?スタンレー|メリルリンチ|ＵＢＳ|UBS|"
-    r"ノルウェー政府|ＳＳＢＴ|SSBT|ＭＬＩ|証券")
+    r"インベストメント|インベスターズ|アセット|"
+    r"キャピタル|パートナーズ|アドバイザー|マネジメント|年金|運用")
+
+
+def classify_holders(holders: list[dict]) -> tuple[float, list[dict]]:
+    """大株主から (非浮動比率, 非浮動とみなした株主) を返す。"""
+    nonfloat, detail = 0.0, []
+    for h in holders:
+        n = h["name"]
+        if _FLOAT_STRONG.search(n):
+            is_non = False
+        elif _NONFLOAT.search(n):
+            is_non = True
+        elif _FLOAT_HINT.search(n):
+            is_non = False
+        else:
+            is_non = True          # 事業会社・創業家など
+        if is_non:
+            nonfloat += h["pct"]
+            detail.append({"name": n, "pct": h["pct"]})
+    return nonfloat, detail
 
 
 def parse_holders(html: str) -> list[dict]:
@@ -245,26 +285,23 @@ def fetch_float_ratio(code: str, use_cache: bool = True) -> dict:
 
     浮動株比率 ≒ 1 - Σ(非浮動とみなした大株主の比率)
     上位10名しか見えないため、11位以下に潜む政策保有株は拾えない(=過大推計になりうる)。
+    キャッシュには生の大株主リストを保存し、比率は毎回引き直すので、
+    分類パターンを直したら再取得なしで反映される。
     """
     p = CACHE / "float" / f"{code}.json"
     if use_cache and p.exists():
-        return json.loads(p.read_text(encoding="utf-8"))
+        holders = json.loads(p.read_text(encoding="utf-8")).get("holders", [])
+    else:
+        holders = parse_holders(fetch(f"https://kabutan.jp/stock/holder?code={code}"))
 
-    html = fetch(f"https://kabutan.jp/stock/holder?code={code}")
-    holders = parse_holders(html)
-    nonfloat, detail = 0.0, []
-    for h in holders:
-        n = h["name"]
-        is_non = bool(_NONFLOAT.search(n)) or not bool(_FLOAT_HINT.search(n))
-        if is_non:
-            nonfloat += h["pct"]
-            detail.append({"name": n, "pct": h["pct"]})
+    nonfloat, detail = classify_holders(holders)
     ratio = max(0.05, min(1.0, 1.0 - nonfloat / 100.0)) if holders else None
     out = {"code": code, "ratio": ratio, "nonfloat_pct": round(nonfloat, 2),
            "holders": holders, "nonfloat": detail}
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
     return out
+
 
 
 # --------------------------------------------------- 母集団から除外される銘柄
