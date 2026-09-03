@@ -27,6 +27,8 @@ def main() -> None:
     for c in inel["seiri"]:
         NG[c] = "整理銘柄"
     KANRI = set(inel["kanri"])
+    # 暗号資産50%超は「新規追加の見送り」なので候補側にだけ効く(既存構成銘柄は対象外)
+    NG_ADD = {c: "新規追加見送り(暗号資産50%超)" for c in R.NO_ADD_CRYPTO}
     idx = R.fetch_daily("0010")
     market_days = {m: sum(1 for d in idx if R.month_of(d) == m) for m in R.MONTHS}
     topix_aug = R.aug_avg_close(idx)
@@ -73,7 +75,11 @@ def main() -> None:
         if not (pf.exists() and fl.exists()):
             continue
         shares = json.loads(pf.read_text(encoding="utf-8")).get("shares")
-        hr = json.loads(fl.read_text(encoding="utf-8")).get("ratio")
+        # キャッシュの ratio は書き込み時点の分類結果なので、分類を直したら合わなくなる。
+        # 生の大株主リストから毎回引き直す。
+        holders = json.loads(fl.read_text(encoding="utf-8")).get("holders", [])
+        nonfloat, _ = R.classify_holders(holders)
+        hr = max(0.05, min(1.0, 1.0 - nonfloat / 100.0)) if holders else None
         if not shares or not hr:
             continue
         implied = m["float_shares"] / shares
@@ -96,7 +102,8 @@ def main() -> None:
             continue
         try:
             prof = R.fetch_profile(code)
-            fl = R.fetch_float_ratio(code)
+            # 大株主の比率は現在の発行済株式数ベースに引き直す(上場時の増資が未反映のため)
+            fl = R.fetch_float_ratio(code, shares_now=prof.get("shares"))
         except Exception:                                        # noqa: BLE001
             continue
         shares, ratio = prof.get("shares"), fl.get("ratio")
@@ -109,7 +116,7 @@ def main() -> None:
         lm = months[0] if months and months[0] > "202509" else None
         tr, detail, nmon = R.turnover_ratio(daily, market_days, float_shares, lm)
         candidates.append({**c, "mktcap": prof.get("mktcap"), "float_ratio": ratio_adj,
-                           "float_ratio_raw": ratio,
+                           "float_ratio_raw": ratio, "rebase": fl.get("rebase"),
                            "float_shares": float_shares, "float_mktcap": fmc,
                            "turnover": tr, "months": nmon, "aug_close": aug,
                            "nonfloat_pct": fl.get("nonfloat_pct"),
@@ -142,6 +149,9 @@ def main() -> None:
         if c["code"] in NG:
             c["add"], c["fail"] = False, ["母集団外(" + NG[c["code"]] + ")"]
             continue
+        if c["code"] in NG_ADD:
+            c["add"], c["fail"] = False, [NG_ADD[c["code"]]]
+            continue
         tr = c["turnover"]
         ok_t = tr is not None and tr >= R.TURNOVER_ADD
         ok_c = c["float_mktcap"] >= t96
@@ -162,7 +172,7 @@ def main() -> None:
         return sum(1 for f in facs if fm / f >= th) / len(facs)
 
     for c in candidates:
-        if c["code"] in NG:
+        if c["code"] in NG or c["code"] in NG_ADD:
             c["p_add"], c["conf"], c["risk"] = None, None, "none"
             continue
         p = p_above(c["float_mktcap"], t96)
@@ -193,7 +203,7 @@ def main() -> None:
     mk = ("code name sector size weight float_mktcap turnover months keep fail "
           "implied_ratio holder_ratio kanri margin risk").split()
     ck = ("code name market mktcap float_ratio float_mktcap turnover months add fail "
-          "nonfloat_pct nonfloat kanri float_ratio_raw p_add conf risk").split()
+          "nonfloat_pct nonfloat kanri float_ratio_raw rebase p_add conf risk").split()
 
     excluded = sorted([m for m in members if not m["keep"]],
                       key=lambda x: -x["float_mktcap"])          # 大きい順
@@ -220,7 +230,8 @@ def main() -> None:
             "n_band_keep": sum(1 for x in kept if t97 <= x["float_mktcap"] < t96),
             "n_band_miss": sum(1 for x in missed if t97 <= x["float_mktcap"] < t96),
             "float_calib": round(float_calib, 4), "n_calib_sample": len(ratios),
-            "ineligible": NG, "n_kanri": len(KANRI),
+            "ineligible": NG, "no_add": NG_ADD, "n_kanri": len(KANRI),
+            "n_rebased": sum(1 for x in candidates if x.get("rebase")),
             "skipped": skipped,
         },
         "excluded": [slim(x, mk) for x in excluded],
@@ -238,6 +249,11 @@ def main() -> None:
     print(f"追加の足切り(96%) {t96/1e8:,.0f}億円  自前計算 {t96_self/1e8:,.0f}億円")
     print(f"現構成 {len(members)} → 継続 {len(kept)} / 除外 {len(excluded)}")
     print(f"母集団から除外(整理・特別注意銘柄) {len(NG)}銘柄: {sorted(NG)}")
+    print(f"新規追加の見送り(暗号資産50%超) {len(NG_ADD)}銘柄: {sorted(NG_ADD)}")
+    rb = [(x["code"], x["name"], x["rebase"]) for x in candidates if x.get("rebase")]
+    print(f"大株主比率を現在の発行済株式数ベースに引き直し {len(rb)}銘柄")
+    for code, name, f in sorted(rb, key=lambda x: x[2]):
+        print(f"    {code} {name} x{f}")
     print(f"浮動株比率のキャリブレーション x{float_calib:.3f} (実測{len(ratios)}銘柄)")
     print(f"候補 {len(candidates)} → 採用 {len(added)}")
     hi = sum(1 for x in added if x["risk"] == "high")

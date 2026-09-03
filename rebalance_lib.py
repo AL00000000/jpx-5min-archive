@@ -39,6 +39,17 @@ JPX_TOTAL_FLOAT_MKTCAP = 691e12   # 現行TOPIX 浮動株時価総額の合計 (
 JPX_TOPIX_MAR_AVG = 3644.58       # 同資料の TOPIX 月間平均 (2026年3月)
 JPX_T97_MAR = 360e8               # 累積比率上位97%以内の最小浮動株時価総額 (約360億円)
 
+# JPX総研が2026年4月3日に算出要領を改定し、「主たる資産を暗号資産とする銘柄」
+# (暗号資産の保有が総資産の50%超)は指数への新規追加を見送ることになった。
+# 2026年10月の定期入替から適用され、既存の構成銘柄は対象外(=除外はされない)。
+# したがって候補銘柄側にだけ効かせる。該当は下記3社と報じられている。
+#   https://www.nikkei.com/article/DGXZQOUB037B30T00C26A4000000/
+NO_ADD_CRYPTO = {
+    "3350": "メタプラネット",          # 暗号資産 約95%
+    "3189": "ANAPホールディングス",    # 約87%
+    "3825": "リミックスポイント",      # 約65%
+}
+
 TURNOVER_ADD = 0.20
 TURNOVER_KEEP = 0.14
 CUM_ADD = 0.96
@@ -236,6 +247,12 @@ _FLOAT_HINT = re.compile(
     r"インベストメント|インベスターズ|アセット|"
     r"キャピタル|パートナーズ|アドバイザー|マネジメント|年金|運用")
 
+# ③の社名は運用会社と「創業家の資産管理会社」の区別がつかない。実在の運用会社が
+# 1銘柄の十数%を単独名義で持つことはまずないので、③に当たっても大量保有なら
+# 資産管理会社(=非浮動)とみなす。①(信託口・カストディアン)はこの判定に掛けない。
+# 例: テクノフレックス(3449)の筆頭株主「ティーエムアセット」51.5% は資産管理会社。
+_HINT_NONFLOAT_PCT = 15.0
+
 
 def classify_holders(holders: list[dict]) -> tuple[float, list[dict]]:
     """大株主から (非浮動比率, 非浮動とみなした株主) を返す。"""
@@ -247,7 +264,7 @@ def classify_holders(holders: list[dict]) -> tuple[float, list[dict]]:
         elif _NONFLOAT.search(n):
             is_non = True
         elif _FLOAT_HINT.search(n):
-            is_non = False
+            is_non = h["pct"] >= _HINT_NONFLOAT_PCT      # 資産管理会社とみなす
         else:
             is_non = True          # 事業会社・創業家など
         if is_non:
@@ -267,26 +284,61 @@ def parse_holders(html: str) -> list[dict]:
         cells = [c for c in cells if c != ""]
         if len(cells) < 3:
             continue
-        name, pct = cells[0], None
-        for c in cells[1:]:
+        name, pct, shares, rest = cells[0], None, None, cells[1:]
+        for i, c in enumerate(rest):
             try:
                 pct = float(c)
-                break
             except ValueError:
                 continue
+            # 比率の次に来る「,」区切りの整数が持ち株数
+            for c2 in rest[i + 1:]:
+                if re.fullmatch(r"[0-9][0-9,]*", c2):
+                    shares = int(c2.replace(",", ""))
+                    break
+            break
         if pct is None or name in ("株主名",):
             continue
-        rows.append({"name": name, "pct": pct})
+        rows.append({"name": name, "pct": pct, "shares": shares})
     return rows
 
 
-def fetch_float_ratio(code: str, use_cache: bool = True) -> dict:
+def rebase_holders(holders: list[dict], shares_now: float | None) -> tuple[list[dict], float | None]:
+    """大株主の比率を「現在の発行済株式数」ベースに引き直す。
+
+    株探の比率は公表時点(有報・目論見書)の発行済株式数ベースで、その後の増資が
+    反映されていない。新規上場銘柄では上場時の公募増資ぶんだけ比率が過大に出るため、
+    非浮動株を大きく見積もりすぎる。
+    例: ティアフォー(593A) SOMPOホールディングス 24.12% は 11,112,500株 ÷ 46.08百万株。
+        現在の発行済 63,524,090株で引き直すと 17.49%。
+
+    株数は分割・併合が反映されていない(株探の注記)ので、公表時点の株数が現在より
+    少ない=増資とみられる場合(倍率 0.55〜1.02)だけ引き直す。分割は倍率が 1/2, 1/3 …
+    と落ちるためこの範囲から外れる。返り値は (引き直した大株主, 倍率)。
+    """
+    if not shares_now or shares_now <= 0:
+        return holders, None
+    bases = [h["shares"] / h["pct"] * 100.0
+             for h in holders if h.get("shares") and h.get("pct")]
+    if len(bases) < 3:
+        return holders, None
+    factor = statistics.median(bases) / shares_now
+    if not (0.55 <= factor <= 1.02):
+        return holders, None
+    out = [{**h, "pct": round(h["shares"] / shares_now * 100.0, 2)}
+           if h.get("shares") else {**h, "pct": round(h["pct"] * factor, 2)}
+           for h in holders]
+    return out, round(factor, 4)
+
+
+def fetch_float_ratio(code: str, use_cache: bool = True,
+                      shares_now: float | None = None) -> dict:
     """大株主上位10名から浮動株比率を推計する。
 
     浮動株比率 ≒ 1 - Σ(非浮動とみなした大株主の比率)
     上位10名しか見えないため、11位以下に潜む政策保有株は拾えない(=過大推計になりうる)。
-    キャッシュには生の大株主リストを保存し、比率は毎回引き直すので、
+    キャッシュには生の大株主リスト(株数つき)を保存し、比率は毎回引き直すので、
     分類パターンを直したら再取得なしで反映される。
+    shares_now を渡すと比率を現在の発行済株式数ベースに引き直す(rebase_holders 参照)。
     """
     p = CACHE / "float" / f"{code}.json"
     if use_cache and p.exists():
@@ -294,12 +346,14 @@ def fetch_float_ratio(code: str, use_cache: bool = True) -> dict:
     else:
         holders = parse_holders(fetch(f"https://kabutan.jp/stock/holder?code={code}"))
 
+    raw = holders                        # キャッシュには必ず生の比率を残す(二重補正の防止)
+    holders, rebase = rebase_holders(raw, shares_now)
     nonfloat, detail = classify_holders(holders)
     ratio = max(0.05, min(1.0, 1.0 - nonfloat / 100.0)) if holders else None
     out = {"code": code, "ratio": ratio, "nonfloat_pct": round(nonfloat, 2),
-           "holders": holders, "nonfloat": detail}
+           "rebase": rebase, "holders": holders, "nonfloat": detail}
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+    p.write_text(json.dumps({**out, "holders": raw}, ensure_ascii=False), encoding="utf-8")
     return out
 
 
