@@ -109,7 +109,13 @@ def main() -> None:
         shares, ratio = prof.get("shares"), fl.get("ratio")
         if not shares or not ratio:
             continue
-        ratio_adj = min(1.0, ratio * float_calib)
+        # 大株主が上場前時点しかない銘柄は、売出しが反映されていないので使えない。
+        # IPOで市場に出た株数から浮動株比率を出す(全株主が見えているので calib は掛けない)。
+        ipo = R.IPO_FLOAT.get(code)
+        if ipo:
+            ratio, ratio_adj = ipo[0] / ipo[1], ipo[0] / ipo[1]
+        else:
+            ratio_adj = min(1.0, ratio * float_calib)
         float_shares = shares * ratio_adj
         fmc = float_shares * aug
         months = sorted({R.month_of(d) for d in daily})
@@ -117,6 +123,8 @@ def main() -> None:
         tr, detail, nmon = R.turnover_ratio(daily, market_days, float_shares, lm)
         candidates.append({**c, "mktcap": prof.get("mktcap"), "float_ratio": ratio_adj,
                            "float_ratio_raw": ratio, "rebase": fl.get("rebase"),
+                           "hdate": fl.get("hdate"), "pre_ipo": bool(fl.get("pre_ipo")),
+                           "float_src": "IPO売出" if ipo else "大株主",
                            "float_shares": float_shares, "float_mktcap": fmc,
                            "turnover": tr, "months": nmon, "aug_close": aug,
                            "nonfloat_pct": fl.get("nonfloat_pct"),
@@ -203,7 +211,8 @@ def main() -> None:
     mk = ("code name sector size weight float_mktcap turnover months keep fail "
           "implied_ratio holder_ratio kanri margin risk").split()
     ck = ("code name market mktcap float_ratio float_mktcap turnover months add fail "
-          "nonfloat_pct nonfloat kanri float_ratio_raw rebase p_add conf risk").split()
+          "nonfloat_pct nonfloat kanri float_ratio_raw rebase hdate pre_ipo float_src "
+          "p_add conf risk").split()
 
     excluded = sorted([m for m in members if not m["keep"]],
                       key=lambda x: -x["float_mktcap"])          # 大きい順
@@ -255,6 +264,22 @@ def main() -> None:
     for code, name, f in sorted(rb, key=lambda x: x[2]):
         print(f"    {code} {name} x{f}")
     print(f"浮動株比率のキャリブレーション x{float_calib:.3f} (実測{len(ratios)}銘柄)")
+    low = [(x["code"], x["name"], x.get("market"), round(x["float_ratio_raw"], 3))
+           for x in candidates
+           if R.LISTING_FLOAT_MIN.get(x.get("market"))
+           and x["float_ratio_raw"] < R.LISTING_FLOAT_MIN[x["market"]]
+           and x.get("float_src") != "IPO売出"]
+    print(f"!? 推計の浮動株比率が上場維持基準の流通株式比率を下回る {len(low)}銘柄"
+          f"(大株主データが古い/分類ミスの疑い。要確認)")
+    for code, name, mk, r in sorted(low, key=lambda x: x[3]):
+        print(f"    {code} {name} {mk} {r}")
+    stale = [(x["code"], x["name"], x.get("hdate"))
+             for x in candidates if x.get("pre_ipo") and x["code"] not in R.IPO_FLOAT]
+    if stale:
+        print(f"!! 大株主が上場前時点のまま({len(stale)}銘柄) — IPO_FLOAT に追加が必要: {stale}")
+    ipo_used = [(x["code"], x["name"], round(x["float_ratio"], 4))
+                for x in candidates if x.get("float_src") == "IPO売出"]
+    print(f"IPO売出ベースで浮動株比率を出した銘柄 {len(ipo_used)}: {ipo_used}")
     print(f"候補 {len(candidates)} → 採用 {len(added)}")
     hi = sum(1 for x in added if x["risk"] == "high")
     hm = sum(1 for x in excluded if x["risk"] == "high")

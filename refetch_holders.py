@@ -16,7 +16,8 @@ codes = [c["code"] for c in load_candidates() if c["code"] not in topix]
 t0, n, ng = time.time(), 0, []
 for i, code in enumerate(codes, 1):
     p = R.CACHE / "float" / f"{code}.json"
-    if p.exists() and any(h.get("shares") for h in json.loads(p.read_text(encoding="utf-8")).get("holders", [])):
+    j = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    if j.get("hdate") and any(h.get("shares") for h in j.get("holders", [])):
         continue
     try:
         R.fetch_float_ratio(code, use_cache=False)

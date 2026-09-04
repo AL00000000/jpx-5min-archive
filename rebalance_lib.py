@@ -50,6 +50,30 @@ NO_ADD_CRYPTO = {
     "3825": "リミックスポイント",      # 約65%
 }
 
+# 新規上場銘柄で、株探の大株主が「上場前」時点しか無いものの浮動株比率。
+# 上場前の資本構成には売出しが反映されていないため、大株主から引くとまるで当てにならない
+# (GO(581A)は上位10名で90.7%を占めるように見えるが、実際は約半分が売出されている)。
+# 代わりに「IPOで市場に出た株数(公募+売出、OA含む) ÷ 現在の発行済株式数」を浮動株比率に使う。
+# 全株主の顔ぶれが見えているのでキャリブレーション(x0.756)は掛けない。
+#   581A GO        2026/06/16上場 公募0株・売出40,482,900株(OA含む) / 発行済81,721,200株
+#   593A ティアフォー 2026/07/22上場 公募17,449,600+売出7,181,100株(OA含む) / 発行済63,524,090株
+IPO_FLOAT = {
+    "581A": (40482900, 81721200),
+    "593A": (24630700, 63524090),
+}
+
+# 東証の上場維持基準(有価証券上場規程第501条)の流通株式比率。IPO時の新規上場基準も同じ値。
+#   プライム   流通株式比率35%以上 / 流通株式時価総額100億円以上 / 流通株式数2万単位以上
+#   スタンダード 同25%以上 / 同10億円以上 / 同2,000単位以上
+#   グロース   同25%以上 / 同 5億円以上 / 同1,000単位以上
+# 「流通株式」= 上場株式 -(10%以上を持つ者の株式 + 役員等の所有株式 + 自己株式
+#   + 国内の普通銀行・保険会社・事業法人等の政策保有株式 + 役員以外の特別利害関係者の株式)。
+# TOPIXの浮動株比率とは別物だが考え方は近く、**上場している以上この水準を大きく下回ることは
+# 普通ない**ので、推計値がここを大きく割ったら大株主データが古いか分類を誤っている疑いが濃い。
+# (GO(581A)を上場前の資本構成で計算して浮動株9%と出したのはこれで検知できる。グロースなので25%基準)
+# https://www.jpx.co.jp/equities/listing/continue/outline/03.html
+LISTING_FLOAT_MIN = {"東Ｐ": 0.35, "東Ｓ": 0.25, "東Ｇ": 0.25}
+
 TURNOVER_ADD = 0.20
 TURNOVER_KEEP = 0.14
 CUM_ADD = 0.96
@@ -273,6 +297,21 @@ def classify_holders(holders: list[dict]) -> tuple[float, list[dict]]:
     return nonfloat, detail
 
 
+def parse_holder_date(html: str) -> tuple[str, bool]:
+    """大株主の基準日タブから ("26.05", 上場前フラグ) を返す。
+
+    株探は基準日を "26.05" のようなタブで出し、**上場前の開示には末尾に "*" が付く**。
+    新規上場銘柄でこれしか無い場合、その大株主リストは売出し前の資本構成なので使えない。
+    """
+    m = re.search(r'(?s)<div class="stock_holder_title date_menu">.*?</ul>', html)
+    if not m:
+        return "", False
+    tabs = re.findall(r">([0-9]{2}\.[0-9]{2})(\*?)<", m.group(0))
+    if not tabs:
+        return "", False
+    return tabs[0][0], tabs[0][1] == "*"
+
+
 def parse_holders(html: str) -> list[dict]:
     m = re.search(r'(?s)<table class="stock_holder_1".*?</table>', html)
     if not m:
@@ -342,16 +381,20 @@ def fetch_float_ratio(code: str, use_cache: bool = True,
     """
     p = CACHE / "float" / f"{code}.json"
     if use_cache and p.exists():
-        holders = json.loads(p.read_text(encoding="utf-8")).get("holders", [])
+        j = json.loads(p.read_text(encoding="utf-8"))
+        holders, hdate, pre = j.get("holders", []), j.get("hdate", ""), j.get("pre_ipo", False)
     else:
-        holders = parse_holders(fetch(f"https://kabutan.jp/stock/holder?code={code}"))
+        html = fetch(f"https://kabutan.jp/stock/holder?code={code}")
+        holders = parse_holders(html)
+        hdate, pre = parse_holder_date(html)
 
     raw = holders                        # キャッシュには必ず生の比率を残す(二重補正の防止)
     holders, rebase = rebase_holders(raw, shares_now)
     nonfloat, detail = classify_holders(holders)
     ratio = max(0.05, min(1.0, 1.0 - nonfloat / 100.0)) if holders else None
     out = {"code": code, "ratio": ratio, "nonfloat_pct": round(nonfloat, 2),
-           "rebase": rebase, "holders": holders, "nonfloat": detail}
+           "rebase": rebase, "hdate": hdate, "pre_ipo": pre,
+           "holders": holders, "nonfloat": detail}
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps({**out, "holders": raw}, ensure_ascii=False), encoding="utf-8")
     return out
