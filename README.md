@@ -4,7 +4,7 @@
 
 **📊 閲覧用サイト: https://al00000000.github.io/jpx-5min-archive/**
 (銘柄検索・表示日数切替つきのローソク足+出来高チャート。
-[売買代金ランキング/その他](https://al00000000.github.io/kabutan-ranking/) の「5分足」タブからも開ける)
+[売買代金ランキング/その他](https://al00000000.github.io/kabulog/) の「5分足」タブからも開ける)
 
 ## 構成
 
